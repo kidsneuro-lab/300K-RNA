@@ -1,0 +1,14 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*/.DS_Store
+.DS_Store
+*.sqlite
+*.Rproj
+*.pbs
+src/sra/junctions_1to22XY_srav3.tsv.gz
+src/gtex/processed/*
+src/junctions_merged_processed_refseq.tsv.gz
+src/junctions_merged_processed_ensembl.tsv.gz
+output/*

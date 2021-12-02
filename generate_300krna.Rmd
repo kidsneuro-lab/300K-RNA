@@ -1,0 +1,503 @@
+---
+title: "R Notebook"
+output: 
+---
+
+```{r message=FALSE}
+options(scipen=999)
+library(data.table)
+library(R.utils)
+```
+
+# Load Splice Junction stats data
+
+```{r}
+merge_sj <- fread('src/junctions_merged_processed_ensembl.tsv.gz', nThread = 4)
+merge_sj_refseq <- fread('src/junctions_merged_processed_refseq.tsv.gz', nThread = 4)
+```
+
+# Check for duplicates
+```{r}
+if (nrow(merge_sj[,.(N = .N), by = .(chrom, start, end)][N > 1]) != 0) { stop("Duplicate rows in merged data") }
+```
+
+```{r}
+merge_sj[strand == '+', `:=` (donor_pos = start, acceptor_pos = end)]
+merge_sj[strand == '-', `:=` (donor_pos = end, acceptor_pos = start)]
+
+merge_sj_refseq[strand == '+', `:=` (donor_pos = start, acceptor_pos = end)]
+merge_sj_refseq[strand == '-', `:=` (donor_pos = end, acceptor_pos = start)]
+```
+
+
+# Load Exons reference - engineering columns to help with variant processing
+
+```{r}
+exons <- fread('ref/ensembl_introns_exons.tsv.gz')
+exons <- exons[region_type == 'exon']
+exons[, donor_pos := ifelse(strand == '+', region_end + 1, region_start - 1)]
+exons[, acceptor_pos := ifelse(strand == '+', region_start - 1, region_end + 1)]
+
+exons[, nextExon_acceptorPos :=  lead(acceptor_pos), by = .(tx_id)]
+exons[, prevExon_donorPos :=  lag(donor_pos), by = .(tx_id)]
+
+exons[, strand_mult := ifelse(strand == '+', 1, -1)]
+
+# remove single exon transcripts
+exons <- exons[!is.na(nextExon_acceptorPos) | !is.na(prevExon_donorPos)]
+
+# for first and last exons annotate neighbouring splice sites slighlty differently
+exons[is.na(nextExon_acceptorPos), nextExon_acceptorPos := donor_pos]
+exons[is.na(prevExon_donorPos), prevExon_donorPos := acceptor_pos]
+
+# get bounds of transcript
+exons[, tx_start := acceptor_pos[region_no == 1], by = tx_id]
+exons[, tx_end := donor_pos[region_no == nexon], by = tx_id]
+
+
+# make helper columns
+exons[, ES_d_lb := min(donor_pos,tx_end), by = 1:nrow(exons)]
+exons[, ES_d_ub := max(donor_pos,tx_end), by = 1:nrow(exons)]
+
+exons[, ES_a_lb := min(acceptor_pos,tx_start), by = 1:nrow(exons)]
+exons[, ES_a_ub := max(acceptor_pos,tx_start), by = 1:nrow(exons)]
+
+exons[, css_lb_d := min(acceptor_pos, nextExon_acceptorPos), by = 1:nrow(exons)]
+exons[, css_ub_d := max(acceptor_pos, nextExon_acceptorPos), by = 1:nrow(exons)]
+
+exons[, css_lb_a := min(donor_pos, prevExon_donorPos), by = 1:nrow(exons)]
+exons[, css_ub_a := max(donor_pos, prevExon_donorPos), by = 1:nrow(exons)]
+
+# filter to unique intron-exon pairs
+exons_dup <- exons[, .(chrom, region_start, region_end, strand, nextExon_acceptorPos, prevExon_donorPos)]
+
+exons_unique <- exons[!duplicated(exons_dup),]
+```
+
+
+```{r}
+exons_refseq <- fread('ref/refseq_introns_exons.tsv.gz')
+exons_refseq <- exons_refseq[region_type == 'exon']
+exons_refseq[, donor_pos := ifelse(strand == '+', region_end + 1, region_start - 1)]
+exons_refseq[, acceptor_pos := ifelse(strand == '+', region_start - 1, region_end + 1)]
+
+exons_refseq[, nextExon_acceptorPos :=  lead(acceptor_pos), by = .(tx_id)]
+exons_refseq[, prevExon_donorPos :=  lag(donor_pos), by = .(tx_id)]
+
+exons_refseq[, strand_mult := ifelse(strand == '+', 1, -1)]
+
+# remove single exon transcripts
+exons_refseq <- exons_refseq[!is.na(nextExon_acceptorPos) | !is.na(prevExon_donorPos)]
+
+# for first and last exons annotate neighbouring splice sites slighlty differently
+exons_refseq[is.na(nextExon_acceptorPos), nextExon_acceptorPos := donor_pos]
+exons_refseq[is.na(prevExon_donorPos), prevExon_donorPos := acceptor_pos]
+
+# get bounds of transcript
+exons_refseq[, tx_start := acceptor_pos[region_no == 1], by = .(chrom, tx_id)]
+exons_refseq[, tx_end := donor_pos[region_no == nexon], by = .(chrom, tx_id)]
+
+
+# make helper columns
+exons_refseq[, ES_d_lb := min(donor_pos,tx_end), by = 1:nrow(exons_refseq)]
+exons_refseq[, ES_d_ub := max(donor_pos,tx_end), by = 1:nrow(exons_refseq)]
+
+exons_refseq[, ES_a_lb := min(acceptor_pos,tx_start), by = 1:nrow(exons_refseq)]
+exons_refseq[, ES_a_ub := max(acceptor_pos,tx_start), by = 1:nrow(exons_refseq)]
+
+exons_refseq[, css_lb_d := min(acceptor_pos, nextExon_acceptorPos), by = 1:nrow(exons_refseq)]
+exons_refseq[, css_ub_d := max(acceptor_pos, nextExon_acceptorPos), by = 1:nrow(exons_refseq)]
+
+exons_refseq[, css_lb_a := min(donor_pos, prevExon_donorPos), by = 1:nrow(exons_refseq)]
+exons_refseq[, css_ub_a := max(donor_pos, prevExon_donorPos), by = 1:nrow(exons_refseq)]
+
+# filter to unique intron-exon pairs
+exons_refseq_dup <- exons_refseq[, .(chrom, region_start, region_end, strand, nextExon_acceptorPos, prevExon_donorPos)]
+
+exons_refseq_unique <- exons_refseq[!duplicated(exons_refseq_dup),]
+```
+
+```{r}
+get_missplicing_table_donors <- function(exons_df, sj_df, col_sel, exons_source) {
+  # step 1. get normal splicing
+  NS <- sj_df[exons_df, 
+              on = .(chrom, donor_pos = exon_donor_pos, acceptor_pos = nextExon_acceptorPos, strand)]
+  NS[is.na(splicing_event_class), splicing_event_class := 'normal splicing']
+  NS[,exon_donor_pos := donor_pos ]
+  # step 2. get exon skipping events
+  ## anchored at previous donor 
+  ES_d <- sj_df[annotated_acceptor == 1][exons_df,allow.cartesian=TRUE,on = .(chrom, strand, 
+                                                         donor_pos = prevExon_donorPos)
+                                         ][data.table::between(acceptor_pos,ES_d_lb,ES_d_ub,incbounds = F)]
+  
+
+  ES_d <- exons_source[, .(tx_id, donor_pos, donor_exon_no = region_no)][ES_d, on = .(tx_id, donor_pos)]
+  ES_d <- exons_source[, .(tx_id, acceptor_pos, acceptor_exon_no = region_no)][ES_d, on = .(tx_id, acceptor_pos)]
+  
+  ## anchored at next acceptor
+  ES_a <- sj_df[annotated_donor == 1][exons_df,allow.cartesian=TRUE,on = .(chrom, strand, 
+                                                      acceptor_pos = nextExon_acceptorPos)
+                                      ][data.table::between(donor_pos,ES_a_lb,
+                                                ES_a_ub,incbounds = F)]
+  
+  ES_a <- exons_source[, .(tx_id, donor_pos, donor_exon_no = region_no)][ES_a, on = .(tx_id, donor_pos)]
+  ES_a <- exons_source[, .(tx_id, acceptor_pos, acceptor_exon_no = region_no)][ES_a, on = .(tx_id, acceptor_pos)]
+
+  # get exon skipping info - exons skipped, #nts omitted from transcript ( to calculate frame)
+  ES <- rbind(ES_a, ES_d, fill = T)
+  ES <- ES[!is.na(acceptor_exon_no) & !is.na(donor_exon_no)]
+  ES[, skipped_exons_count := acceptor_exon_no - donor_exon_no - 1]
+  
+  ES[, paste_first := donor_exon_no + 1]
+  ES[, paste_second := acceptor_exon_no - 1]
+  
+  nts_skipped_join <- exons_source[, .(tx_id, region_no, region_width)][ES[, .(tx_id, exon_donor_pos,exon_acceptor_pos, 
+                                                                        paste_first, paste_second)], 
+                                                                 on = .(tx_id, region_no >= paste_first, 
+                                                                        region_no <= paste_second)]
+  
+  nts_skipped_join <- nts_skipped_join[, .(skipped_exons_nt = sum(region_width)), 
+                                       by = .(tx_id, exon_donor_pos, exon_acceptor_pos, 
+                                              paste_first = region_no, paste_second = region_no.1)]
+  
+  ES <- nts_skipped_join[ES, on = .(tx_id, exon_donor_pos,exon_acceptor_pos, 
+                                    paste_first, paste_second)]
+  
+  ES[paste_second == paste_first, paste_second := NA]
+  ES[, skipped_exons_id := do.call(paste, c(.SD, sep="-")), .SDcols= paste_first:paste_second]
+  ES[, skipped_exons_id := gsub('-NA', '',skipped_exons_id )]
+  
+  ES[splicing_event_class == 'normal splicing', splicing_event_class := 'exon skipping (annotated)']
+  ES[, missplicing_inframe := ifelse(skipped_exons_nt %% 3 == 0, 1, 0)]
+
+  # step 3. get cryptic splicing events
+  ## cryptic donor
+  CSS <-sj_df[exons_df,allow.cartesian = TRUE, on = .(chrom, strand, 
+                                                     acceptor_pos = nextExon_acceptorPos)
+              ][donor_pos != exon_donor_pos & 
+                  data.table::between(donor_pos, css_lb_d, css_ub_d)]
+ 
+  # calculate distance of cryptic to authentic splice site
+  CSS[, cryptic_pos := donor_pos]
+  CSS[, cryptic_distance := strand_mult * (donor_pos - exon_donor_pos) ]
+  CSS[, missplicing_inframe := ifelse(cryptic_distance %% 3 == 0, 1, 0)]
+  CSS[, cryptic_distance := ifelse(cryptic_distance > 0, cryptic_distance + 1, cryptic_distance)]
+  CSS[splicing_event_class == 'normal splicing' | annotated_donor == 1, splicing_event_class := 'alternative donor (annotated)']
+
+  
+  # step 4. combine into one mis-splicing event table
+  ms_table <- rbind(NS, ES, CSS, fill = T)
+  setDT(ms_table)
+  ms_table[, splice_site_pos := exon_donor_pos]
+  cols <- c('gene_name', 'tx_id', 'canonical', 'chrom', 'splice_site_pos',
+            'exon_donor_pos', 'exon_acceptor_pos', 
+            'region_width', 'region_no', 'strand',
+            'donor_pos', 'acceptor_pos', 
+            'sample_count', col_sel, 'splicing_event_class',
+            'skipped_exons_count', 'skipped_exons_id', 'skipped_exons_nt',
+            'cryptic_pos', 'cryptic_distance', 'missplicing_inframe')
+  ms_table <- distinct(ms_table[, ..cols])
+  
+  setorder(ms_table, tx_id, region_no, -sample_count)
+  
+  
+  return(ms_table)
+}
+```
+
+```{r}
+get_missplicing_table_acceptors <- function(exons_df, sj_df, col_sel, exons_source) {
+  # step 1. get normal splicing
+  NS <- sj_df[exons_df, 
+              on = .(chrom, donor_pos = prevExon_donorPos, acceptor_pos = exon_acceptor_pos, strand)]
+  NS[is.na(splicing_event_class), splicing_event_class := 'normal splicing']
+  NS[, exon_acceptor_pos := acceptor_pos]
+  
+  # step 2. get exon skipping events
+  ## anchored at previous donor 
+  ES_d <- sj_df[annotated_acceptor == 1][exons_df,allow.cartesian=TRUE,on = .(chrom, strand, 
+                                                         donor_pos = prevExon_donorPos)
+                                         ][data.table::between(acceptor_pos,ES_d_lb,ES_d_ub,incbounds = F)]
+  
+  ES_d <- exons_source[, .(tx_id, donor_pos, donor_exon_no = region_no)][ES_d, on = .(tx_id, donor_pos)]
+  ES_d <- exons_source[, .(tx_id, acceptor_pos, acceptor_exon_no = region_no)][ES_d, on = .(tx_id, acceptor_pos)]
+  
+  ## anchored at next acceptor
+  ES_a <- sj_df[annotated_donor == 1][exons_df,allow.cartesian=TRUE,on = .(chrom, strand, 
+                                                      acceptor_pos = nextExon_acceptorPos)
+                                      ][data.table::between(donor_pos,ES_a_lb,
+                                                ES_a_ub,incbounds = F)]
+  
+  ES_a <- exons_source[, .(tx_id, donor_pos, donor_exon_no = region_no)][ES_a, on = .(tx_id, donor_pos)]
+  ES_a <- exons_source[, .(tx_id, acceptor_pos, acceptor_exon_no = region_no)][ES_a, on = .(tx_id, acceptor_pos)]
+  
+  # get exon skipping info - exons skipped, #nts omitted from transcript ( to calculate frame)
+  ES <- rbind(ES_a, ES_d, fill = T)
+  ES <- ES[!is.na(acceptor_exon_no) & !is.na(donor_exon_no)]
+  ES[, skipped_exons_count := acceptor_exon_no - donor_exon_no - 1]
+  
+  ES[, paste_first := donor_exon_no + 1]
+  ES[, paste_second := acceptor_exon_no - 1]
+  
+  nts_skipped_join <- exons_source[, .(tx_id, region_no, region_width)][ES[, .(tx_id, exon_donor_pos,exon_acceptor_pos, 
+                                                                        paste_first, paste_second)], 
+                                                                 on = .(tx_id, region_no >= paste_first, region_no <= paste_second)]
+  
+  nts_skipped_join <- nts_skipped_join[, .(skipped_exons_nt = sum(region_width)), 
+                                       by = .(tx_id, exon_donor_pos, exon_acceptor_pos, paste_first = region_no, paste_second = region_no.1)]
+  
+  ES <- nts_skipped_join[ES, on = .(tx_id, exon_donor_pos,exon_acceptor_pos, 
+                                    paste_first, paste_second)]
+  
+  ES[paste_second == paste_first, paste_second := NA]
+  ES[, skipped_exons_id := do.call(paste, c(.SD, sep="-")), .SDcols= paste_first:paste_second]
+  ES[, skipped_exons_id := gsub('-NA', '',skipped_exons_id )]
+  
+  ES[splicing_event_class == 'normal splicing', splicing_event_class := 'exon skipping (annotated)']
+  ES[, missplicing_inframe := ifelse(skipped_exons_nt %% 3 == 0, 1, 0)]
+  
+  # step 3. get cryptic splicing events
+  ## cryptic acceptor
+  CSS <-sj_df[exons_df,allow.cartesian=TRUE, on = .(chrom, strand, 
+                                                     donor_pos = prevExon_donorPos)
+              ][acceptor_pos != exon_acceptor_pos & 
+                  data.table::between(acceptor_pos, css_lb_a, css_ub_a)]
+  
+  # calculate distance of cryptic to authentic splice site
+  CSS[, cryptic_pos := acceptor_pos]
+  CSS[, cryptic_distance := strand_mult * (acceptor_pos - exon_acceptor_pos) ]
+  CSS[, missplicing_inframe := ifelse(cryptic_distance %% 3 == 0, 1, 0)]
+  CSS[, cryptic_distance := ifelse(cryptic_distance < 0, cryptic_distance - 1, cryptic_distance)]
+  CSS[splicing_event_class == 'normal splicing'| annotated_acceptor == 1, splicing_event_class := 'alternative acceptor (annotated)']
+  
+  # step 4. combine into one mis-splicing event table
+  ms_table <- rbind(NS, ES, CSS, fill = T)
+  setDT(ms_table)
+  ms_table[, splice_site_pos := exon_acceptor_pos]
+  cols <- c('gene_name', 'tx_id','canonical', 'chrom', 'splice_site_pos',
+            'exon_donor_pos', 'exon_acceptor_pos', 
+            'region_width', 'region_no', 'strand',
+            'donor_pos', 'acceptor_pos', 
+            'sample_count', col_sel, 'splicing_event_class',
+            'skipped_exons_count', 'skipped_exons_id', 'skipped_exons_nt',
+            'cryptic_pos', 'cryptic_distance', 'missplicing_inframe')
+  ms_table <- distinct(ms_table[, ..cols])
+  
+ 
+  
+  setorder(ms_table, tx_id, region_no, -sample_count)
+  
+  return(ms_table)
+}
+```
+
+
+
+```{r}
+# get mis-splicing events for ensembl donors
+exons_df_donor <- exons[last_region== 0, 
+                               .(gene_name, tx_id,canonical,
+                                 chrom, region_start, region_end, region_width, region_no, 
+                                 nexon, strand, last_region,
+                                 exon_donor_pos = donor_pos, 
+                                 exon_acceptor_pos = acceptor_pos, 
+                                 nextExon_acceptorPos, 
+                                 prevExon_donorPos, 
+                                 strand_mult, tx_start, tx_end, 
+                                 ES_d_lb, ES_d_ub, ES_a_lb, ES_a_ub, 
+                                 css_lb_d, css_ub_d, css_lb_a, css_ub_a)]
+
+
+ms_donors <- get_missplicing_table_donors(exons_df_donor,merge_sj, c('sample_count_gtex', 'max_uniq_reads', 'sample_count_sra'),
+                                          exons)
+```
+
+```{r}
+# get mis-splicing events for ensembl acceptors
+exons_df_acceptor <- exons[region_no != 1, 
+                               .(gene_name, tx_id,canonical,
+                                chrom, region_start, region_end, region_width, region_no, 
+                                 nexon, strand, last_region,
+                                 exon_donor_pos = donor_pos, 
+                                 exon_acceptor_pos = acceptor_pos, 
+                                 nextExon_acceptorPos, 
+                                 prevExon_donorPos, 
+                                 strand_mult, tx_start, tx_end, 
+                                 ES_d_lb, ES_d_ub, ES_a_lb, ES_a_ub, 
+                                 css_lb_d, css_ub_d, css_lb_a, css_ub_a)]
+
+
+ms_acceptors <- get_missplicing_table_acceptors(exons_df_acceptor,merge_sj, c('sample_count_gtex', 'max_uniq_reads', 'sample_count_sra'),
+                                                exons)
+```
+
+```{r}
+# merge mis-splicing events for ensembl transcripts
+ms_donors[, ss_type := 'donor']
+ms_acceptors[, ss_type := 'acceptor']
+ms_all <- distinct(rbind(ms_donors, ms_acceptors))
+ms_all[, in_gtex := ifelse(sample_count_gtex > 0, TRUE, FALSE)]
+ms_all[, in_sra := ifelse(sample_count_sra > 0,TRUE, FALSE)]
+```
+
+```{r}
+# adding helpful columns
+ms_all[, event_count := .N, by = list(splice_site_pos, tx_id)]
+ms_all[, event_rank := rowid(splice_site_pos), by = list(tx_id)]
+ms_all[splicing_event_class != 'normal splicing', missplicing_event_rank := rowid(splice_site_pos), by = list(tx_id)]
+
+ms_all[missplicing_inframe == 1, missplicing_inframe := TRUE]
+ms_all[missplicing_inframe == 0, missplicing_inframe := FALSE]
+ms_all[splicing_event_class == 'normal splicing', missplicing_inframe := TRUE]
+ms_all[, missplicing_inframe := as.logical(missplicing_inframe)]
+
+ms_all2 <- ms_all[,.(splice_site_pos, 
+                     gene_name,
+                     tx_id, 
+                     canonical,
+                     ss_type,
+                     exon_no = region_no,
+                     strand, 
+                     splicing_event_class, 
+                     event_rank, 
+                     in_gtex, 
+                     in_sra, 
+                     missplicing_inframe,
+                     gtex_sample_count = sample_count_gtex,
+                     max_uniq_reads,
+                     sra_sample_count = sample_count_sra,
+                     sample_count,
+                     skipped_exons_count,
+                     skipped_exons_id,
+                     cryptic_distance, 
+                     chr = chrom, 
+                     donor_pos, 
+                     acceptor_pos, 
+                     assembly = 'hg38',
+                     transcript_type = 'ensembl')]
+
+```
+
+# Check for duplicates
+* There are duplicated here, however I am ignoring these (given the low Ns). To do with trancript annotations- confusion over whether event is an annotated cryptic or exon skipping
+```{r}
+merged_dup_count <- nrow(ms_all2[,.(N = .N), by = .(splice_site_pos, tx_id, chr, donor_pos, acceptor_pos, ss_type)][N > 1])
+if (merged_dup_count != 0) { stop(paste("Duplicate rows in merged data, n = ", merged_dup_count)) }
+```
+
+
+
+```{r}
+fwrite(ms_all2, 'output/300KRNA_ensembl.tsv.gz', sep = '\t', nThread = 4, compress = 'gzip')
+
+ms_all2 <- fread('output/300KRNA_ensembl.tsv.gz')
+```
+
+
+# generating for refseq tx as well
+
+
+```{r}
+# get mis-splicing events for refseq donors
+exons_df_donor_refseq <- exons_refseq[last_region== 0, 
+                               .(gene_name, tx_id,canonical,
+                                 chrom, region_start, region_end, region_width, region_no, 
+                                 nexon, strand, last_region,
+                                 exon_donor_pos = donor_pos, 
+                                 exon_acceptor_pos = acceptor_pos, 
+                                 nextExon_acceptorPos, 
+                                 prevExon_donorPos, 
+                                 strand_mult, tx_start, tx_end, 
+                                 ES_d_lb, ES_d_ub, ES_a_lb, ES_a_ub, 
+                                 css_lb_d, css_ub_d, css_lb_a, css_ub_a)]
+
+
+ms_donors_refseq <- get_missplicing_table_donors(exons_df_donor_refseq,merge_sj_refseq, 
+                                                 c('sample_count_gtex', 'max_uniq_reads', 'sample_count_sra'),
+                                                 exons_refseq)
+
+```
+
+
+```{r}
+# get mis-splicing events for refseq acceptors
+exons_df_acceptor_refseq <- exons_refseq[region_no != 1, 
+                               .(gene_name, tx_id,canonical,
+                                chrom, region_start, region_end, region_width, region_no, 
+                                 nexon, strand, last_region,
+                                 exon_donor_pos = donor_pos, 
+                                 exon_acceptor_pos = acceptor_pos, 
+                                 nextExon_acceptorPos, 
+                                 prevExon_donorPos, 
+                                 strand_mult, tx_start, tx_end, 
+                                 ES_d_lb, ES_d_ub, ES_a_lb, ES_a_ub, 
+                                 css_lb_d, css_ub_d, css_lb_a, css_ub_a)]
+
+
+ms_acceptors_refseq <- get_missplicing_table_acceptors(exons_df_acceptor_refseq,merge_sj_refseq, 
+                                                       c('sample_count_gtex', 'max_uniq_reads', 'sample_count_sra'),
+                                                       exons_refseq)
+
+```
+
+```{r}
+# merge mis-splicing events for refseq transcripts
+ms_donors_refseq[, ss_type := 'donor']
+ms_acceptors_refseq[, ss_type := 'acceptor']
+ms_all_refseq <- distinct(rbind(ms_donors_refseq, ms_acceptors_refseq))
+ms_all_refseq[, in_gtex := ifelse(sample_count_gtex > 0, TRUE, FALSE)]
+ms_all_refseq[, in_sra := ifelse(sample_count_sra > 0,TRUE, FALSE)]
+```
+
+```{r}
+# adding helpful columns
+ms_all_refseq[, event_count := .N, by = list(splice_site_pos, tx_id)]
+ms_all_refseq[, event_rank := rowid(splice_site_pos), by = list(tx_id)]
+ms_all_refseq[splicing_event_class != 'normal splicing', missplicing_event_rank := rowid(splice_site_pos), by = list(tx_id)]
+
+ms_all_refseq[missplicing_inframe == 1, missplicing_inframe := TRUE]
+ms_all_refseq[missplicing_inframe == 0, missplicing_inframe := FALSE]
+ms_all_refseq[splicing_event_class == 'normal splicing', missplicing_inframe := TRUE]
+ms_all_refseq[, missplicing_inframe := as.logical(missplicing_inframe)]
+
+ms_all2_refseq <- ms_all_refseq[,.(splice_site_pos, 
+                     gene_name,
+                     tx_id, 
+                     canonical,
+                     ss_type,
+                     exon_no = region_no,
+                     strand, 
+                     splicing_event_class, 
+                     event_rank, 
+                     in_gtex, 
+                     in_sra, 
+                     missplicing_inframe,
+                     gtex_sample_count = sample_count_gtex,
+                     max_uniq_reads,
+                     sra_sample_count = sample_count_sra,
+                     sample_count,
+                     skipped_exons_count,
+                     skipped_exons_id,
+                     cryptic_distance, 
+                     chr = chrom, 
+                     donor_pos, 
+                     acceptor_pos, 
+                     assembly = 'hg38',
+                     transcript_type = 'refseq')]
+
+```
+
+# Check for duplicates
+* There are duplicated here, however I am ignoring these (given the low Ns). To do with trancript annotations- confusion over whether event is an annotated cryptic or exon skipping
+```{r}
+merged_dup_count <- nrow(ms_all2_refseq[,.(N = .N), by = .(splice_site_pos, tx_id, chr, donor_pos, acceptor_pos,ss_type)][N > 1])
+if (merged_dup_count != 0) { stop(paste("Duplicate rows in merged data, n = ", merged_dup_count)) }
+```
+
+
+
+```{r}
+fwrite(ms_all2_refseq, 'output/300KRNA_refseq.tsv.gz', sep = '\t', nThread = 4, compress = 'gzip')
+```
+
+
