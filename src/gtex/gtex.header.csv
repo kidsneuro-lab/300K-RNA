@@ -1,1 +1,1 @@
-chrom,start,end,sample_count,strand,motif,annotated,min_uniq_reads,q1_uniq_reads,median_uniq_reads,q3_uniq_reads,max_uniq_reads,mean_uniq_reads,min_multi_reads,q1_multi_reads,median_multi_reads,q3_multi_reads,max_multi_reads,mean_multi_reads,perc1_uniq_reads,perc5_uniq_reads,perc95_uniq_reads,perc99_uniq_reads,perc1_multi_reads,perc5_multi_reads,perc95_multi_reads,perc99_multi_reads
+chrom,start,end,strand,left_motif,right_motif,sample_count

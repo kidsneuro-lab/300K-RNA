@@ -5,16 +5,20 @@ output:
 
 ```{r message=FALSE}
 options(scipen=999)
+library(tidyverse)
 library(data.table)
 library(R.utils)
+library(RSQLite)
+library(BSgenome.Hsapiens.1000genomes.hs37d5)
 ```
 
 # Load Splice Junction stats data
 
 ```{r}
-merge_sj <- fread('src/junctions_merged_processed_ensembl.tsv.gz', nThread = 4)
+merge_sj <- fread('src/junctions_merged_processed.tsv.gz', nThread = 4)
 merge_sj_refseq <- fread('src/junctions_merged_processed_refseq.tsv.gz', nThread = 4)
 ```
+
 
 # Check for duplicates
 ```{r}
@@ -294,7 +298,6 @@ get_missplicing_table_acceptors <- function(exons_df, sj_df, col_sel, exons_sour
 
 
 ```{r}
-# get mis-splicing events for ensembl donors
 exons_df_donor <- exons[last_region== 0, 
                                .(gene_name, tx_id,canonical,
                                  chrom, region_start, region_end, region_width, region_no, 
@@ -308,12 +311,13 @@ exons_df_donor <- exons[last_region== 0,
                                  css_lb_d, css_ub_d, css_lb_a, css_ub_a)]
 
 
-ms_donors <- get_missplicing_table_donors(exons_df_donor,merge_sj, c('sample_count_gtex', 'max_uniq_reads', 'sample_count_sra'),
+ms_donors <- get_missplicing_table_donors(exons_df_donor,merge_sj, c('sample_count_gtex', 'sample_count_sra'),
                                           exons)
+
 ```
 
 ```{r}
-# get mis-splicing events for ensembl acceptors
+
 exons_df_acceptor <- exons[region_no != 1, 
                                .(gene_name, tx_id,canonical,
                                 chrom, region_start, region_end, region_width, region_no, 
@@ -327,12 +331,11 @@ exons_df_acceptor <- exons[region_no != 1,
                                  css_lb_d, css_ub_d, css_lb_a, css_ub_a)]
 
 
-ms_acceptors <- get_missplicing_table_acceptors(exons_df_acceptor,merge_sj, c('sample_count_gtex', 'max_uniq_reads', 'sample_count_sra'),
+ms_acceptors <- get_missplicing_table_acceptors(exons_df_acceptor,merge_sj, c('sample_count_gtex', 'sample_count_sra'),
                                                 exons)
 ```
 
 ```{r}
-# merge mis-splicing events for ensembl transcripts
 ms_donors[, ss_type := 'donor']
 ms_acceptors[, ss_type := 'acceptor']
 ms_all <- distinct(rbind(ms_donors, ms_acceptors))
@@ -341,7 +344,6 @@ ms_all[, in_sra := ifelse(sample_count_sra > 0,TRUE, FALSE)]
 ```
 
 ```{r}
-# adding helpful columns
 ms_all[, event_count := .N, by = list(splice_site_pos, tx_id)]
 ms_all[, event_rank := rowid(splice_site_pos), by = list(tx_id)]
 ms_all[splicing_event_class != 'normal splicing', missplicing_event_rank := rowid(splice_site_pos), by = list(tx_id)]
@@ -364,7 +366,6 @@ ms_all2 <- ms_all[,.(splice_site_pos,
                      in_sra, 
                      missplicing_inframe,
                      gtex_sample_count = sample_count_gtex,
-                     max_uniq_reads,
                      sra_sample_count = sample_count_sra,
                      sample_count,
                      skipped_exons_count,
@@ -381,16 +382,19 @@ ms_all2 <- ms_all[,.(splice_site_pos,
 # Check for duplicates
 * There are duplicated here, however I am ignoring these (given the low Ns). To do with trancript annotations- confusion over whether event is an annotated cryptic or exon skipping
 ```{r}
-merged_dup_count <- nrow(ms_all2[,.(N = .N), by = .(splice_site_pos, tx_id, chr, donor_pos, acceptor_pos, ss_type)][N > 1])
-if (merged_dup_count != 0) { stop(paste("Duplicate rows in merged data, n = ", merged_dup_count)) }
+# merged_dup_count <- nrow(ms_all2[,.(N = .N), by = .(splice_site_pos, tx_id, chr, donor_pos, acceptor_pos, ss_type)][N > 1])
+# if (merged_dup_count != 0) { stop(paste("Duplicate rows in merged data, n = ", merged_dup_count)) }
+# 
+# ms_all2[ms_all2[,.(N = .N), by = .(splice_site_pos, tx_id, chr, donor_pos, acceptor_pos, ss_type)][N > 1], 
+#         on = .(splice_site_pos, tx_id, chr, donor_pos, acceptor_pos, ss_type)]
+
+
 ```
 
 
 
 ```{r}
 fwrite(ms_all2, 'output/300KRNA_ensembl.tsv.gz', sep = '\t', nThread = 4, compress = 'gzip')
-
-ms_all2 <- fread('output/300KRNA_ensembl.tsv.gz')
 ```
 
 
@@ -398,7 +402,6 @@ ms_all2 <- fread('output/300KRNA_ensembl.tsv.gz')
 
 
 ```{r}
-# get mis-splicing events for refseq donors
 exons_df_donor_refseq <- exons_refseq[last_region== 0, 
                                .(gene_name, tx_id,canonical,
                                  chrom, region_start, region_end, region_width, region_no, 
@@ -413,14 +416,14 @@ exons_df_donor_refseq <- exons_refseq[last_region== 0,
 
 
 ms_donors_refseq <- get_missplicing_table_donors(exons_df_donor_refseq,merge_sj_refseq, 
-                                                 c('sample_count_gtex', 'max_uniq_reads', 'sample_count_sra'),
+                                                 c('sample_count_gtex', 'sample_count_sra'),
                                                  exons_refseq)
 
 ```
 
 
 ```{r}
-# get mis-splicing events for refseq acceptors
+
 exons_df_acceptor_refseq <- exons_refseq[region_no != 1, 
                                .(gene_name, tx_id,canonical,
                                 chrom, region_start, region_end, region_width, region_no, 
@@ -435,13 +438,12 @@ exons_df_acceptor_refseq <- exons_refseq[region_no != 1,
 
 
 ms_acceptors_refseq <- get_missplicing_table_acceptors(exons_df_acceptor_refseq,merge_sj_refseq, 
-                                                       c('sample_count_gtex', 'max_uniq_reads', 'sample_count_sra'),
+                                                       c('sample_count_gtex', 'sample_count_sra'),
                                                        exons_refseq)
 
 ```
 
 ```{r}
-# merge mis-splicing events for refseq transcripts
 ms_donors_refseq[, ss_type := 'donor']
 ms_acceptors_refseq[, ss_type := 'acceptor']
 ms_all_refseq <- distinct(rbind(ms_donors_refseq, ms_acceptors_refseq))
@@ -450,7 +452,6 @@ ms_all_refseq[, in_sra := ifelse(sample_count_sra > 0,TRUE, FALSE)]
 ```
 
 ```{r}
-# adding helpful columns
 ms_all_refseq[, event_count := .N, by = list(splice_site_pos, tx_id)]
 ms_all_refseq[, event_rank := rowid(splice_site_pos), by = list(tx_id)]
 ms_all_refseq[splicing_event_class != 'normal splicing', missplicing_event_rank := rowid(splice_site_pos), by = list(tx_id)]
@@ -473,7 +474,6 @@ ms_all2_refseq <- ms_all_refseq[,.(splice_site_pos,
                      in_sra, 
                      missplicing_inframe,
                      gtex_sample_count = sample_count_gtex,
-                     max_uniq_reads,
                      sra_sample_count = sample_count_sra,
                      sample_count,
                      skipped_exons_count,
@@ -490,14 +490,15 @@ ms_all2_refseq <- ms_all_refseq[,.(splice_site_pos,
 # Check for duplicates
 * There are duplicated here, however I am ignoring these (given the low Ns). To do with trancript annotations- confusion over whether event is an annotated cryptic or exon skipping
 ```{r}
-merged_dup_count <- nrow(ms_all2_refseq[,.(N = .N), by = .(splice_site_pos, tx_id, chr, donor_pos, acceptor_pos,ss_type)][N > 1])
-if (merged_dup_count != 0) { stop(paste("Duplicate rows in merged data, n = ", merged_dup_count)) }
+# merged_dup_count <- nrow(ms_all2_refseq[,.(N = .N), by = .(splice_site_pos, tx_id, chr, donor_pos, acceptor_pos,ss_type)][N > 1])
+# if (merged_dup_count != 0) { stop(paste("Duplicate rows in merged data, n = ", merged_dup_count)) }
 ```
 
 
 
 ```{r}
 fwrite(ms_all2_refseq, 'output/300KRNA_refseq.tsv.gz', sep = '\t', nThread = 4, compress = 'gzip')
+
 ```
 
 

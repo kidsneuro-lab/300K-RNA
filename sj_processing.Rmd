@@ -8,26 +8,19 @@ library(data.table)
 ```
 
 ```{r}
-gtex <- fread('src/gtex/processed/GTEx_V8.sorted.summary.gz')
-gtex_names <- fread('src/gtex/gtex.header.csv')
-setnames(gtex, names(gtex_names))
-gtex[, strand := as.character(strand)]
-gtex[strand == '1', strand := '+']
-gtex[strand == '2', strand := '-']
+gtex <- fread('src/gtex/junctions_1to22XY_gtexv2_filt.tsv.gz')
 
 sra <- fread('src/sra/junctions_1to22XY_srav3_filt.tsv.gz')
-sra_names <- fread('src/sra/sra.header.csv')
-setnames(sra, names(sra_names))
 ```
-
 
 
 # step 1: merge sra & gtex sj data
 	- Columns to join on: chrom, start, end, strand
 	- Columns to add: sra_samples_count, gtex_samples_count, gtex_max_reads
 
+
 ```{r}
-gtex <- gtex[, .(chrom, start, end, strand, sample_count, max_uniq_reads, max_multi_reads)]
+gtex <- gtex[, .(chrom, start, end, strand, sample_count)]
 sra <- sra[, .(chrom, start, end, strand, sample_count)]
 ```
 
@@ -38,7 +31,10 @@ merge <- merge(gtex, sra, by = c('chrom', 'start', 'end', 'strand'),
 merge[, chrom := gsub('chr', '', chrom)]
 ```
 
+
+
 # step 2: Filter to splice junctions where 1 end is annotated
+
 
 ```{r}
 transcripts <- fread('ref/ensembl_introns_exons.tsv.gz')
@@ -56,6 +52,7 @@ ann_ends[, annotated_end := 1]
 ann_sjs <- unique(transcripts[, .(chrom, start = region_start, end = region_end)])
 ann_sjs[, annotated_sj := 1]
 ```
+
 
 ```{r}
 merge <- ann_starts[merge, on = .(chrom, start)]
@@ -79,6 +76,7 @@ matrix[, splicing_event_class := c(rep('normal splicing',2), rep('exon skipping'
 merge <- matrix[merge, on = .(strand, annotated_sj, annotated_start, annotated_end)]
 ```
 
+
 ```{r}
 merge[strand == '+' & annotated_start == 1, annotated_donor := 1]
 merge[strand == '-' & annotated_end == 1, annotated_donor := 1]
@@ -98,7 +96,7 @@ merge[, sample_count := sample_count_gtex + sample_count_sra]
 # save
 ```{r}
 fwrite(merge[, .(chrom, start, end, strand, annotated_donor, annotated_acceptor, 
-                 splicing_event_class, sample_count_gtex, max_uniq_reads, sample_count_sra, sample_count)], 'src/junctions_merged_processed_ensembl.tsv.gz')
+                 splicing_event_class, sample_count_gtex, sample_count_sra, sample_count)], 'src/junctions_merged_processed.tsv.gz')
 ```
 
 
@@ -107,6 +105,13 @@ fwrite(merge[, .(chrom, start, end, strand, annotated_donor, annotated_acceptor,
 # repeat for REFSEQ
 
 # step 2: Filter to splice junctions where 1 end is annotated
+
+
+```{r}
+merge <- merge(gtex, sra, by = c('chrom', 'start', 'end', 'strand'), 
+               all = TRUE, suffixes = c('_gtex', '_sra'))
+merge[, chrom := gsub('chr', '', chrom)]
+```
 
 
 ```{r}
@@ -169,7 +174,7 @@ merge[, sample_count := sample_count_gtex + sample_count_sra]
 # save
 ```{r}
 fwrite(merge[, .(chrom, start, end, strand, annotated_donor, annotated_acceptor, 
-                 splicing_event_class, sample_count_gtex, max_uniq_reads, sample_count_sra, sample_count)], 'src/junctions_merged_processed_refseq.tsv.gz')
+                 splicing_event_class, sample_count_gtex, sample_count_sra, sample_count)], 'src/junctions_merged_processed_refseq.tsv.gz')
 ```
 
 
